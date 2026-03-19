@@ -7,3 +7,7 @@ data/
 
 # logs
 logs/
+
+# python cache
+__pycache__/
+*.pyc
