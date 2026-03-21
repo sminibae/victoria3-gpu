@@ -1,0 +1,13 @@
+# claude
+.claude/
+CLAUDE.md
+
+# data
+data/
+
+# logs
+logs/
+
+# python cache
+__pycache__/
+*.pyc
