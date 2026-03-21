@@ -1,0 +1,48 @@
+# <gitmoji> <type>: <title>
+
+# Title: include issue number, max 50 characters on one line
+# ------------------------------------------------|
+# Body: max 72 characters per line
+# ----------------------------------------------------------------------|
+# ----------------------------------------------------------------------|
+# ----------------------------------------------------------------------|
+# ----------------------------------------------------------------------|
+
+# ------------------
+
+# Rules:
+# - Write the title as an imperative sentence (e.g., "Add feature", "Fix bug")
+# - Title must be 50 chars or less, no trailing punctuation
+# - Separate title and body with a blank line
+# - Body should explain WHAT and WHY (not HOW)
+# - Body lines must be 72 chars or less
+# - Footer for additional info (BREAKING CHANGE, related issues, etc.)
+
+# ------------------
+
+# <type> list
+# ✨ feat:       Add a new feature
+# 🐛 fix:        Fix a bug
+# ♻ refactor:    Refactor code without changing functionality
+# 💄 style:      UI/style changes (no logic changes)
+# 📝 docs:       Documentation changes
+# ✅ test:       Add or modify tests
+# 🔨 chore:      Minor changes
+# 🚀 perf:       Performance improvements (speed, memory, etc.)
+# 📦 build:      Build system or dependency changes
+# 🔀 merge:      Merge commit
+
+# ------------------
+
+# Example commit message
+# ✨ feat: Launch new feature
+#
+# Detailed description of the change
+# Detailed description of the change
+# Detailed description of the change
+#
+# Footer: Related issue: #123
+
+# ------------------
+# git config commit.template .commit_template
+# Run the above command to set this as the default commit template
