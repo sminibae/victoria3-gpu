@@ -2,166 +2,131 @@
 
 A clean-room, GPU-accelerated economic simulator that replicates Victoria 3's economic mechanics using only publicly available data.
 
-Not a mod, clone, or derivative of the binary. This is a **research project**: can a single-threaded grand strategy simulation be reimplemented as vectorized tensor operations on the GPU?
+**Core hypothesis**: Victoria 3's single-threaded economic simulation (Clausewitz engine) can be reimplemented as vectorized tensor operations on the GPU, achieving dramatic speedup without simplifying the model.
 
----
+## Why This Exists
 
-## Motivation
+Victoria 3 simulates a global economy across 100 years of industrialization. Every weekly tick evaluates thousands of population units, hundreds of buildings, and dozens of interconnected markets — all on a single CPU core. By the late game, the simulation slows to a crawl.
 
-Victoria 3 runs its economic simulation on a single CPU core (Clausewitz / Jomini engine). As a game progresses, thousands of POPs, hundreds of buildings, and dozens of interconnected markets interact every tick. The simulation slows noticeably over time because it is fundamentally sequential.
+But most of this computation is structurally parallel: building output, POP demand, wage updates, and price adjustments are all independent across entities. These are tensor operations trapped in a sequential loop.
 
-The core hypothesis:
+This project asks: **what if we ran the same economic model on a GPU?**
 
-> Most of that simulation is embarrassingly parallel. Market clearing, POP demand, building output, and wage computation are large matrix operations over a structured state space. A GPU can run these orders of magnitude faster. A boundary approximation model can also replace per-agent tracking with bulk inflow/outflow calculations at cell interfaces, borrowing from finite-volume methods in physics.
+Two approaches are explored:
 
-The tick loop, expressed as tensors:
+1. **GPU offloading** — Express per-entity calculations as sparse matrix multiplications and element-wise transforms, then execute them on GPU.
+2. **Boundary approximation** — Model the economy as flows through a continuous field (finite-volume style), computing only flux at boundaries rather than tracking every agent.
 
-```text
-output = production_matrix @ building_state       # building throughput
-demand = consumption_matrix @ POP_state           # POP demand
-market_state = solve_equilibrium(output, demand)  # iterative CUDA kernel
-POP_state = update_wealth(wages, need_satisfaction)
-building_state = update_investment(profit_margins)
-```
+## The Math
 
----
-
-## Legal and Ethical Scope
-
-This project uses **only publicly available data**. The binary is never touched.
-
-| Allowed | Not Allowed |
-|---|---|
-| Game script files (`.txt`) that Paradox deliberately exposes | Disassembling or decompiling `victoria3.exe` |
-| Official wiki formulas (`vic3.paradoxwikis.com`) | Distributing game assets |
-| Developer diaries and blog posts | Creating derivative works of the binary |
-| Community modding documentation | Bypassing DRM |
-| Building an independent research simulator | Distributing a Victoria 3 replacement |
-
-Everything in this repo must be reproducible from public data only, without owning or running the game.
-
----
-
-## Architecture
-
-Two core ideas drive the design:
-
-**1. GPU offloading** — Per-entity computations (POP demand, building output, wage calculation) are independent across entities and map naturally to GPU parallelism.
-
-**2. Boundary approximation** — Instead of tracking every individual POP and building, model the economy as flows across a grid. Only compute inflow/outflow at the boundaries between market regions, population strata, and supply-demand zones. This is analogous to finite-volume methods in computational fluid dynamics.
+The entire game state lives in a single vector **S[t]** (~1.3M floats, ~5MB), updated each tick by a piecewise-linear operator:
 
 ```
-Data Layer          Model Layer            Solver Layer
-Script Parser  -->  Economic State Graph   CPU: Main tick loop
-Wiki Scraper        POP Tensor         --> GPU: Parallel compute
-Dev Diary Corpus    Market Matrix
-                    Flow Grid
+S[t+1] = Φ(S[t], Θ_i, Θ_u[t])
 ```
 
----
+| Symbol | Meaning |
+|--------|---------|
+| S[t] | Universal state at tick t (buildings, pops, prices, treasury, tech) |
+| Θ_i | Invariant game rules (production I/O, consumption baskets, map topology) |
+| Θ_u[t] | Player choices (PM selection, laws, construction orders) |
+| Φ | The tick function — a composition of sparse sub-operators |
 
-## Project Structure
+Every subsystem is a **projection** of S through Θ. Nothing derived is ever stored.
+
+The tick decomposes into GPU-friendly sub-operators:
 
 ```
-victoria3-gpu/
-├── data/
-│   ├── raw/                # Raw game scripts (bring your own copy)
-│   ├── parsed/             # Structured JSON/Parquet output from parser
-│   └── wiki/               # Scraped wiki pages and extracted formulas
-├── src/
-│   ├── parser/             # Paradox .txt script file parser
-│   ├── scraper/            # Wiki and dev diary scraper
-│   ├── model/              # Economic model (CPU reference implementation)
-│   │   ├── market.py
-│   │   ├── pops.py
-│   │   ├── buildings.py
-│   │   └── tick.py
-│   ├── gpu/                # GPU-accelerated kernels
-│   │   ├── market_solver.py
-│   │   └── pop_demand.py
-│   └── boundary/           # Boundary approximation layer
-│       ├── grid.py
-│       └── flux.py
-├── tests/
-│   ├── unit/               # Per-equation correctness tests
-│   └── scenarios/          # Full scenario validation
-└── notebooks/
-    ├── 01_data_exploration.ipynb
-    ├── 02_model_validation.ipynb
-    └── 03_benchmarks.ipynb
+output     = P_io @ Θ_u.active_PM @ S.building_levels   # sparse matmul
+demand     = C_needs @ S.pop_count                       # sparse matmul
+supply     = aggregate(output, by=market)                # reduction
+Δprices    = K · (supply - demand)                       # element-wise
+Δwages     = clamp(α · profit, -max, +max)               # element-wise
+Δpop       = M_adjacency · SoL_diff                      # sparse matvec
+S[t+1]     = S[t] + [Δprices, Δwages, ...]              # element-wise add
 ```
 
----
+One CPU→GPU transfer per tick, then a chain of GPU kernels, then readback. No mid-tick CPU round-trips.
 
-## Development Phases
+> Full mathematical framework: [ideas/03_state_space_framework.md](ideas/03_state_space_framework.md)
+> GPU pipeline design: [ideas/04_action_and_gpu_design.md](ideas/04_action_and_gpu_design.md)
 
-| Phase | Goal | Deliverable |
-|---|---|---|
-| **0** | Data collection — parse scripts, scrape wiki, index dev diaries | `data/` corpus |
-| **1** | Formalize the economic model as mathematical equations | `docs/economic_model.md` |
-| **2** | Vectorization design — tensor layouts, GPU ops, boundary approx spec | `docs/vectorization_design.md` |
-| **3a** | CPU reference implementation (correctness baseline) | Working Python simulator |
-| **3b** | GPU-accelerated tick | Benchmark: ticks/sec vs. CPU |
-| **3c** | Boundary approximation implementation | Accuracy vs. speed tradeoff |
-| **4** | Validation against known Victoria 3 scenarios | Validation report |
-| **5** | Research report | `docs/research_report.md` |
+## Project Phases
 
----
+| Phase | Goal | Status |
+|-------|------|--------|
+| 0 | Data collection — parse game scripts, scrape wiki, index dev diaries | In progress |
+| 1 | Formalize economic model as math equations | — |
+| 2 | Vectorization design — tensor layouts, GPU ops, boundary approximation | — |
+| 3a | CPU reference implementation (correctness baseline) | — |
+| 3b | GPU-accelerated tick | — |
+| 3c | Boundary approximation implementation | — |
+| 4 | Validation against known Victoria 3 scenarios | — |
+| 5 | Research report | — |
 
 ## Data Sources
 
-All simulation parameters come from files Paradox deliberately exposes or publicly documents:
+All knowledge comes from publicly available sources. **The binary is never touched.**
 
-- **`common/defines/00_defines.txt`** — simulation constants (tick rate, market elasticity, decay coefficients)
-- **`common/goods/`** — tradeable goods, base prices
-- **`common/buildings/`** — building types, input/output goods
-- **`common/production_methods/`** — per-method throughput ratios
-- **`common/pop_types/`** — POP categories, wage structure
-- **`common/buy_packages/`** — consumption baskets per wealth level
-- **`common/script_values/`** — derived computation formulas
-- **vic3.paradoxwikis.com** — market formulas, MAPI, POP needs
-- **Paradox developer diaries** — system design intent, balance passes
+- **Game script files** — `.txt` files under `game/common/` (buildings, goods, production methods, defines)
+- **Official wiki** — `vic3.paradoxwikis.com` (price formulas, MAPI, substitution logic)
+- **Developer diaries** — 150+ posts explaining system design
+- **Modding community** — GitHub tools, forum analysis, empirical measurements
 
 > You need to supply your own copy of the game scripts. This repo does not and will not distribute game files.
 
----
-
 ## Technology Stack
 
-| Layer | Technology |
-|---|---|
-| Prototyping | Python |
-| GPU kernels | PyTorch (CUDA); custom CUDA/Vulkan as needed |
-| Data processing | Polars, NumPy, Apache Arrow |
-| Visualization | Matplotlib, Plotly |
-| Performance target | Rust or C++ for the final solver |
+| Layer | Tool |
+|-------|------|
+| Language | Python (prototyping) → Rust or C++ (performance) |
+| GPU | PyTorch (CUDA); possibly custom CUDA/Vulkan later |
+| Data | Polars / NumPy / Arrow |
+| Visualization | Matplotlib / Plotly |
 
----
+## Directory Structure
+
+```
+victoria3-gpu/
+├── ideas/                # Design documents and research notes
+│   ├── 00_notation.md
+│   ├── 01_motivation.md
+│   ├── 02_project_plan.md
+│   ├── 03_state_space_framework.md
+│   └── 04_action_and_gpu_design.md
+├── data/
+│   ├── raw/              # Parsed game scripts (user's own copy)
+│   ├── parsed/           # Structured JSON/Parquet output
+│   └── wiki/             # Scraped wiki pages and formulas
+├── src/
+│   ├── parser/           # Paradox .txt script file parser
+│   ├── scraper/          # Wiki and dev diary scraper
+│   ├── model/            # Economic model (CPU reference)
+│   ├── gpu/              # GPU-accelerated kernels
+│   └── boundary/         # Boundary approximation layer
+├── tests/
+├── notebooks/
+└── logs/
+```
 
 ## Success Criteria
 
-1. CPU reference simulator within **10%** of actual Victoria 3 game values for standard scenarios
-2. GPU acceleration achieves **at least 5x speedup** over the CPU reference
-3. Boundary approximation retains **at least 90% accuracy** vs. full agent simulation at **3x speedup**
+1. CPU reference within **10%** of actual Victoria 3 game values for standard scenarios
+2. GPU acceleration **≥ 5x** speedup over CPU reference
+3. Boundary approximation **≥ 90%** accuracy vs. full agent sim at **3x** speedup
 4. Full pipeline reproducible from **public data only**
-
----
 
 ## Open Research Questions
 
 - **Market solver convergence**: What iterative method converges fastest for 100+ interconnected markets on a GPU?
 - **Temporal stability**: Does the boundary approximation stay stable over long time horizons, or does numerical drift accumulate?
 - **POP heterogeneity**: How much within-stratum variation is needed for accurate macro behavior?
-- **Trade flow modeling**: Can inter-market trade fold into the same GPU pass as domestic markets, or must it run sequentially?
-- **Event shocks**: How do discrete, non-differentiable events (wars, famines, political upheaval) interact with an otherwise smooth field model?
-
----
+- **Trade flow modeling**: Can inter-market trade fold into the same GPU pass as domestic markets?
+- **Event shocks**: How do discrete, non-differentiable events interact with an otherwise smooth field model?
 
 ## Status
 
 Currently in **Phase 0** — building the data collection and parsing pipeline.
-
----
 
 ## Contributing
 
@@ -169,8 +134,10 @@ This is a research project in early stages. If you are interested in economic si
 
 Please do not submit contributions that involve decompiled binary code or distributed game assets.
 
----
+## Legal
+
+This is a clean-room re-implementation. No game binaries are analyzed, decompiled, or reverse-engineered. All information comes from publicly exposed script files, official wiki, developer diaries, and community documentation. No game assets are distributed.
 
 ## License
 
-TBD. The research code will be open source. Game data is owned by Paradox Interactive and is not included in this repository.
+[AGPL-3.0](LICENSE)
